@@ -31,6 +31,8 @@ Live example: <https://matplo.github.io/publix/>
   screen. Tested on a tree of 34,000 files in 2,900 folders.
 - **Side panel** with live search (`/` to focus), type filters (HTML · PDF · Image · Video · …),
   and sizes and dates. It stays in sync with the 3D view.
+- **Light and dark themes.** The page follows the viewer's system setting, and a toolbar button
+  switches between them (the choice is remembered). `--theme` sets the default.
 - **Deep links.** `index.html#talks/2026` opens with that folder unfolded.
 - **Graceful fallbacks.** Without WebGL you get a plain list. With JavaScript off you get a static
   `<ul>` of links. The page honours `prefers-reduced-motion`, and on a phone the panel becomes a
@@ -41,7 +43,7 @@ Live example: <https://matplo.github.io/publix/>
 ## Usage
 
 ```
-index-browser [DIR] [-o FILE] [-t TITLE] [-x GLOB ...] [--link URL] [--fresh] [--check] [--serve]
+index-browser [DIR] [-o FILE] [-t TITLE] [-x GLOB ...] [--link URL] [--theme T] [--fresh] [--check] [--serve]
 ```
 
 | option | |
@@ -51,6 +53,7 @@ index-browser [DIR] [-o FILE] [-t TITLE] [-x GLOB ...] [--link URL] [--fresh] [-
 | `-t, --title TITLE` | page title (default: the directory's name) |
 | `-x, --exclude GLOB` | skip names or `DIR`-relative paths matching `GLOB` (repeatable). Dot-files, `__pycache__` and `node_modules` are always skipped |
 | `--link URL` / `--link-text` | a link in the panel footer, e.g. your repo |
+| `--theme auto\|light\|dark` | default theme for viewers who haven't picked one with the toggle (default `auto`: follow the system) |
 | `--no-git` | use modification times, not commit dates |
 | `--fresh` | rewrite the page from the bundled template (see below) |
 | `--check` | write nothing; exit 1 if the page is missing or stale |
@@ -58,7 +61,8 @@ index-browser [DIR] [-o FILE] [-t TITLE] [-x GLOB ...] [--link URL] [--fresh] [-
 
 ### Re-running and hand edits
 
-The page has three generated regions: the `<title>`, a JSON data block and the no-JS list.
+The page has four generated regions: the `<title>`, the theme tag, a JSON data block and the
+no-JS list.
 Re-running `index-browser` rewrites **only those**, so you can restyle the page by hand and keep
 refreshing it. After upgrading index-browser, run with `--fresh` to pick up the new page design;
 this discards hand edits. index-browser never overwrites an `index.html` it didn't create unless

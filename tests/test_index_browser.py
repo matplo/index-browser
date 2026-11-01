@@ -108,3 +108,15 @@ def test_cli_check_and_errors(site, capsys):
     assert main([str(site), "--no-git", "--check"]) == 1
     assert main([str(site / "nope")]) == 2
     assert "not a directory" in capsys.readouterr().err
+
+
+def test_theme_default(site):
+    build(site, use_git=False)
+    page = site / "index.html"
+    assert '<meta name="ib-theme" content="auto" />' in page.read_text(encoding="utf-8")
+    build(site, use_git=False, theme="light")          # re-run updates the tag in place
+    assert '<meta name="ib-theme" content="light" />' in page.read_text(encoding="utf-8")
+    with pytest.raises(IndexBrowserError):
+        build(site, use_git=False, theme="neon")
+    assert main([str(site), "--no-git", "-q", "--theme", "dark"]) == 0
+    assert '<meta name="ib-theme" content="dark" />' in page.read_text(encoding="utf-8")

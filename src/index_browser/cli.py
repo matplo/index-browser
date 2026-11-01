@@ -39,6 +39,9 @@ def _parser() -> argparse.ArgumentParser:
                         "(dot-files are always skipped)")
     p.add_argument("--link", metavar="URL", help="link shown in the panel footer, e.g. the source repo")
     p.add_argument("--link-text", metavar="TEXT", help="label for --link (default: source)")
+    p.add_argument("--theme", choices=("auto", "light", "dark"), default="auto",
+                   help="default colour theme for viewers who haven't picked one with the page's "
+                        "toggle (default: auto, i.e. follow the system setting)")
     p.add_argument("--no-git", action="store_true",
                    help="use file modification times instead of last-commit dates")
     p.add_argument("--fresh", action="store_true",
@@ -68,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         res = build(args.dir, args.output, title=args.title, excludes=args.exclude,
                     link=args.link, link_text=args.link_text, use_git=not args.no_git,
-                    fresh=args.fresh, dry_run=args.check)
+                    fresh=args.fresh, dry_run=args.check, theme=args.theme)
     except IndexBrowserError as exc:
         print(f"index-browser: error: {exc}", file=sys.stderr)
         return 2

@@ -31,6 +31,8 @@ _TITLE_RE = re.compile(rb"<title[^>]*>(.*?)</title>", re.I | re.S)
 _PAGE_TITLE_RE = re.compile(r"<title>.*?</title>", re.S)
 _MANIFEST_RE = re.compile(r'(<script type="application/json" id="ib-manifest">)(.*?)(</script>)', re.S)
 _STATIC_RE = re.compile(r"(<!-- index-browser:static -->)(.*?)(<!-- /index-browser:static -->)", re.S)
+_THEME_RE = re.compile(r'(<meta name="ib-theme" content=")[a-z]*(" />)')
+THEMES = ("auto", "light", "dark")
 
 
 class IndexBrowserError(Exception):
@@ -171,7 +173,7 @@ def static_list(node: dict) -> str:
 
 
 def render(page: str, tree: dict, title: str, link: str | None = None,
-           link_text: str | None = None) -> str:
+           link_text: str | None = None, theme: str = "auto") -> str:
     """Fill the generated regions of page with tree's data."""
     manifest: dict = {"title": title, "root": dict(tree, name=title)}
     if link:
@@ -182,6 +184,10 @@ def render(page: str, tree: dict, title: str, link: str | None = None,
     data = json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c")
     page = _MANIFEST_RE.sub(lambda m: m.group(1) + data + m.group(3), page, count=1)
     page = _STATIC_RE.sub(lambda m: m.group(1) + static_list(tree) + m.group(3), page, count=1)
+    if theme not in THEMES:
+        raise IndexBrowserError(f"theme must be one of {', '.join(THEMES)}, not {theme!r}")
+    # Pages made before 0.4 have no theme tag; they simply keep their dark design.
+    page = _THEME_RE.sub(lambda m: m.group(1) + theme + m.group(2), page, count=1)
     return _PAGE_TITLE_RE.sub(lambda m: f"<title>{html.escape(title)}</title>", page, count=1)
 
 
@@ -192,12 +198,14 @@ def is_generated(page: str) -> bool:
 def build(root: str | os.PathLike = ".", output: str | os.PathLike | None = None, *,
           title: str | None = None, excludes: Iterable[str] = (), link: str | None = None,
           link_text: str | None = None, use_git: bool = True, fresh: bool = False,
-          dry_run: bool = False) -> Result:
+          dry_run: bool = False, theme: str = "auto") -> Result:
     """Scan root and create or refresh its index page.
 
     An existing page made by index-browser is updated in place (hand edits outside the
     generated regions survive). ``fresh=True`` rewrites it from the bundled template, and is
-    required to replace an index.html that index-browser did not create.
+    required to replace an index.html that index-browser did not create. ``theme`` ("auto",
+    "light" or "dark") is the default for viewers who haven't picked one with the page's
+    toggle; "auto" follows their system setting.
     """
     root = Path(root).resolve()
     if not root.is_dir():
@@ -215,7 +223,7 @@ def build(root: str | os.PathLike = ".", output: str | os.PathLike | None = None
     if out.parent == root or root in out.parents:
         skip.append(out.relative_to(root).as_posix())
     tree = scan(root, excludes, skip=skip, use_git=use_git)
-    page = render(base, tree, title, link, link_text)
+    page = render(base, tree, title, link, link_text, theme)
 
     changed = page != existing
     if changed and not dry_run:
