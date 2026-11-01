@@ -56,13 +56,14 @@ def test_rerun_is_idempotent_and_skips_own_output(site):
 def test_keeps_hand_edits_outside_generated_regions(site):
     build(site, use_git=False)
     page = site / "index.html"
-    page.write_text(page.read_text().replace("</style>", "/* mine */</style>"))
+    page.write_text(page.read_text(encoding="utf-8").replace("</style>", "/* mine */</style>"),
+                    encoding="utf-8")
     (site / "new.txt").write_text("new")
     build(site, use_git=False)
-    text = page.read_text()
+    text = page.read_text(encoding="utf-8")
     assert "/* mine */" in text and "new.txt" in text
     build(site, use_git=False, fresh=True)
-    assert "/* mine */" not in page.read_text()
+    assert "/* mine */" not in page.read_text(encoding="utf-8")
 
 
 def test_refuses_foreign_index(site):
@@ -70,18 +71,19 @@ def test_refuses_foreign_index(site):
     with pytest.raises(IndexBrowserError):
         build(site, use_git=False)
     build(site, use_git=False, fresh=True)
-    assert "ib-manifest" in (site / "index.html").read_text()
+    assert "ib-manifest" in (site / "index.html").read_text(encoding="utf-8")
 
 
 def test_script_breakout_is_escaped(tmp_path):
-    # File names can't contain "/", but HTML titles (and --title) can carry "</script>".
-    (tmp_path / "<b>.html").write_text("<title>x&lt;/script&gt;&lt;b&gt;</title>")
+    # File names can't contain "/" (nor "<" on Windows), but HTML titles and --title can.
+    (tmp_path / "a&b.html").write_text("<title>x&lt;/script&gt;&lt;b&gt;</title>", encoding="utf-8")
     build(tmp_path, use_git=False, title="T</title>")
-    text = (tmp_path / "index.html").read_text()
+    text = (tmp_path / "index.html").read_text(encoding="utf-8")
     assert text.count("</script>") == template().count("</script>")
     assert "<title>T&lt;/title&gt;</title>" in text
     item = manifest(tmp_path / "index.html")["root"]["children"][0]
-    assert item["title"] == "x</script><b>" and item["name"] == "<b>.html"
+    assert item["title"] == "x</script><b>" and item["name"] == "a&b.html"
+    assert 'href="a%26b.html"' in text and ">a&amp;b.html</a>" in text
 
 
 def test_excludes_and_link(site):

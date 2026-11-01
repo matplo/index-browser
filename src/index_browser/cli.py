@@ -73,7 +73,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"index-browser: error: {exc}", file=sys.stderr)
         return 2
 
-    rel = os.path.relpath(res.output)
+    try:
+        rel = os.path.relpath(res.output)
+    except ValueError:  # Windows: output on another drive than the cwd
+        rel = ".."
     where = str(res.output) if rel.startswith("..") else rel
     summary = f"{res.files} files in {res.folders} folders, {_human(res.size)}"
     if args.check:
