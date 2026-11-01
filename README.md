@@ -1,7 +1,7 @@
 # index-browser
 
 Turn any directory of files into an interactive **3D `index.html`** for the files: talks, papers,
-figures and media. Folders are wireframe cubes that **fan out** into their files when clicked.
+figures and media. Folders are glass cubes that **fan out** into their files when clicked.
 Click a file to open it in a new tab. A side panel adds search, type filters and a plain list.
 
 Made for static hosting such as GitHub Pages: one self-contained HTML file, no build step, and
@@ -19,13 +19,16 @@ Live example: <https://matplo.github.io/publix/>
 
 ## What you get
 
-- **A tree you fly through** (three.js). Folders are wireframe cubes and files are square
-  outlines, coloured by type. The top-level folders sit on a common surface around the root.
+- **A tree you fly through** (three.js). Folders are small glass cubes and files are thin
+  translucent tiles, coloured by type. The top-level folders sit on a common surface around the root.
   Click a folder and its contents fan out in a plane perpendicular to the one it sits in,
   pointing away from the centre, and the camera flies to face it. Sub-folders fan out again,
   at right angles to their parent.
-- **Stays fast with thousands of files.** Every cube and square is drawn in two instanced draw
-  calls, and only the labels that matter (the open folder, its path, its files) are on screen.
+- **Stays fast with tens of thousands of files.** Nothing is built until it is needed: the 3D
+  view only sets up what is inside open folders, and the panel builds a folder's rows the first
+  time it is opened. All cubes and all tiles are two instanced draw calls whose animation runs
+  on the GPU, and only the labels that matter (the open folder, its path, its files) are on
+  screen. Tested on a tree of 34,000 files in 2,900 folders.
 - **Side panel** with live search (`/` to focus), type filters (HTML · PDF · Image · Video · …),
   and sizes and dates. It stays in sync with the 3D view.
 - **Deep links.** `index.html#talks/2026` opens with that folder unfolded.

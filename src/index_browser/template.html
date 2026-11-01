@@ -137,6 +137,7 @@
   .kids-in { min-height: 0; overflow: hidden; margin-left: 15px; padding-left: 6px; border-left: 1px solid var(--line); }
   .kids .item { opacity: 0; transform: translateX(-6px); transition: opacity .3s, transform .35s cubic-bezier(.2, .8, .2, 1); }
   .kids.open > .kids-in > .item { opacity: 1; transform: none; transition-delay: calc(var(--i, 0) * 22ms); }
+  .kids.big, .kids.big > .kids-in > .item { transition: none; }   /* long lists open at once */
   .empty { padding: 18px 10px; color: var(--faint); font-style: italic; }
 
   .p-foot { display: flex; justify-content: space-between; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); color: var(--faint); font: 11px var(--mono); }
@@ -362,8 +363,12 @@ let hot = null;           // node under the pointer (list or scene)
 let shown = null;         // node in the detail card
 
 const treeEl = $('#tree');
+let filterOn = false;     // a search or type filter is active (rows built later start hidden if they don't match)
+// Rows are built lazily: a folder's children get their rows the first time it is unfolded,
+// so a tree with tens of thousands of files costs nothing up front.
 function buildRow(n, i) {
   const wrap = el('div', 'item'); wrap.style.setProperty('--i', Math.min(i, 14));
+  if (filterOn && !n.match) wrap.hidden = true;
   n.el = wrap;
   let row;
   if (n.type === 'dir') {
@@ -371,11 +376,10 @@ function buildRow(n, i) {
     row.innerHTML = `<span class="chev">${ICON.chev}</span><span class="ico">${ICON.folder}</span>`;
     row.append(el('span', 'nm', n.name), el('span', 'meta', n.fileCount));
     row.addEventListener('click', () => toggle(n));
-    const kids = el('div', 'kids'), inner = el('div', 'kids-in');
-    n.children.forEach((c, j) => inner.appendChild(buildRow(c, j)));
+    const kids = el('div', n.children.length > 150 ? 'kids big' : 'kids'), inner = el('div', 'kids-in');
     kids.appendChild(inner);
     wrap.append(row, kids);
-    n.kids = kids;
+    n.kids = kids; n.built = false;
   } else {
     row = el('a', 'row file');
     row.href = n.href; row.target = '_blank'; row.rel = 'noopener';
@@ -399,6 +403,12 @@ treeEl.appendChild(emptyEl);
 
 function syncRow(n) {
   if (n.type !== 'dir' || !n.row) return;
+  if (n.expanded && !n.built) {
+    n.built = true;
+    const inner = n.kids.firstChild, frag = document.createDocumentFragment();
+    n.children.forEach((c, j) => frag.appendChild(buildRow(c, j)));
+    inner.appendChild(frag);
+  }
   n.row.setAttribute('aria-expanded', n.expanded);
   n.kids.classList.toggle('open', n.expanded);
   n.kids.inert = !n.expanded;
@@ -511,7 +521,7 @@ chips.forEach(([, b]) => chipsEl.appendChild(b));
 
 const filtering = () => !!filter.q || filter.kinds.size < present.length;
 function applyFilter() {
-  const on = filtering();
+  const on = filterOn = filtering();
   chips.forEach(([k, b]) => { b.setAttribute('aria-pressed', filter.kinds.has(k)); b.classList.toggle('solo', filter.kinds.size < present.length); });
   const q = filter.q;
   (function mark(n) {
@@ -572,8 +582,9 @@ let startFocus = root;   // folder the 3D view opens on
 
 /* =====================================================================
    3D view
-   Folders are wireframe cubes and files are camera-facing square outlines; each shape is
-   one instanced draw call, so the cost hardly grows with the number of files.
+   Folders are glass cubes and files thin translucent tiles; each shape is one instanced
+   draw call whose animation runs in the vertex shader, and only nodes inside open folders
+   are ever set up, so the cost hardly grows with the size of the tree.
    The top-level folders sit on a common surface around the root. An open folder fans its
    contents out in a plane perpendicular to its parent's plane, pointing away from the
    parent: files on the inner arcs, sub-folders on the rim (so their own fans open outward,
@@ -587,11 +598,12 @@ async function initView() {
   const V = THREE.Vector3;
 
   const BG = 0x05070d;
-  const DUR = reduceMotion ? 0 : 800;
-  const FILE = 1;            // file square edge
-  const SP = 1.6;            // spacing between file squares along an arc
-  const SPD = 3.2;           // spacing between folder cubes along an arc
-  const ROW = 1.7;           // distance between the arcs of a fan
+  const DUR = reduceMotion ? 0 : 800;    // unfold / fold
+  const FADE = reduceMotion ? 0 : 400;   // dimming when the focus changes
+  const TILE = 0.5, TH = 0.08;           // file tile: edge and thickness
+  const SP = 0.85;           // spacing between file tiles along an arc
+  const SPD = 2.0;           // spacing between folder cubes along an arc
+  const ROW = 0.95;          // distance between the arcs of a fan
   const A = 1.2;             // half-angle of a fan (~69°)
   const TAU = Math.PI * 2;
   const LABEL_FILES = 60;    // label the focused folder's files when it has at most this many
@@ -607,7 +619,7 @@ async function initView() {
   scene.fog = new THREE.Fog(BG, 30, 120);
 
   const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.1, 8000);
-  camera.position.set(0, 30, 30);
+  camera.position.set(21, 30, 21);   // 45° off the first top-level folder, so fans are never seen edge-on
 
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
@@ -615,16 +627,21 @@ async function initView() {
   controls.minDistance = 1.5;
   controls.maxDistance = 6000;
 
-  /* ---- per-node state ---- */
+  /* ---- per-node state, created the first time a node is shown ---- */
   for (const d of dirs) {
     d.files = d.children.filter(c => c.type === 'file');
     d.subdirs = d.children.filter(c => c.type === 'dir');
   }
-  const sizeOf = n => n.type === 'file' ? FILE : n === root ? 1.7 : Math.min(1.4, 0.85 + 0.06 * Math.log2(1 + n.fileCount));
-  for (const n of nodes) Object.assign(n, {
-    x: 0, y: 0, z: 0, s: 0, hs: 1, al: 1, alT: 1,
-    shown: false, hiding: false, tw: null, col: new THREE.Color(n.color), sz: sizeOf(n),
-  });
+  const sizeOf = n => n.type === 'file' ? TILE : n === root ? 0.9 : Math.min(0.7, 0.42 + 0.04 * Math.log2(1 + n.fileCount));
+  const colors = new Map();
+  const colorOf = s => { let c = colors.get(s); if (!c) colors.set(s, c = new THREE.Color(s)); return c; };
+  function ensure(n) {
+    if (n.sz === undefined) Object.assign(n, {
+      x: 0, y: 0, z: 0, s: 0, al: 1, a0: 1, a1: 1, ta: -1e9, tw: null,
+      shown: false, hiding: false, fresh: false, slot: -1, sz: sizeOf(n), col: colorOf(n.color),
+    });
+    return n;
+  }
 
   /* ---- layout ----
      Each open folder lays its children on arcs in the plane spanned by (d, e): d points
@@ -650,13 +667,13 @@ async function initView() {
   }
 
   function place(n, P, d, e, targets) {
-    targets.set(n, [P.x, P.y, P.z]);
+    targets.set(ensure(n), [P.x, P.y, P.z]);
     if (n.type !== 'dir' || !n.expanded) return;
     const full = n === root;
     const N = new V().crossVectors(d, e).normalize();          // this folder's plane normal
     Object.assign(n, { _d: d, _e: e, _N: N });
     const out = [];
-    let r = n.sz * 0.7 + (full ? 2.4 : 1.8);
+    let r = n.sz * 0.7 + (full ? 1.6 : 1.0);
     if (n.files.length) r = arcs(n.files, SP, r, full, P, d, e, out) + ROW * 0.6;
     arcs(n.subdirs, SPD, r, full, P, d, e, out);
     for (const [c, x, y, z] of out) {
@@ -666,9 +683,39 @@ async function initView() {
     }
   }
 
+  /* ---- animation ----
+     A node's tween (from, to, start time, scale from/to) and fade (alpha from/to, start time)
+     go to the GPU once, when the layout changes; the vertex shader evaluates them every
+     frame, so nothing per node runs in JavaScript while things move. posAt() is the same
+     math on the CPU, used only for picking, labels and the folder links. */
+  const clamp01 = t => t < 0 ? 0 : t > 1 ? 1 : t;
+  const easeInOut = t => t < .5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
+  const easeOutBack = t => { const u = t - 1; return 1 + 2.4 * u * u * u + 1.4 * u * u; };
+  function posAt(n, now) {
+    const tw = n.tw;
+    if (tw) {
+      const t = DUR ? clamp01((now - tw.t0) / DUR) : 1, e = easeInOut(t);
+      n.x = tw.x0 + (tw.x1 - tw.x0) * e;
+      n.y = tw.y0 + (tw.y1 - tw.y0) * e;
+      n.z = tw.z0 + (tw.z1 - tw.z0) * e;
+      n.s = tw.s0 + (tw.s1 - tw.s0) * (tw.s1 >= tw.s0 ? easeOutBack(t) : t * t * t);
+    }
+    const u = FADE ? clamp01((now - n.ta) / FADE) : 1;
+    n.al = n.a0 + (n.a1 - n.a0) * u * u * (3 - 2 * u);
+    return n;
+  }
+  let animEnd = 0;                         // when the last tween or fade finishes
+  function setTween(n, t, s, t0) {
+    n.tw = { x0: n.x, y0: n.y, z0: n.z, s0: n.s, x1: t[0], y1: t[1], z1: t[2], s1: s, t0 };
+    animEnd = Math.max(animEnd, t0 + DUR);
+  }
+
   let focus = startFocus;
   let targets = new Map();
+  let live = [];                           // nodes on screen or shrinking away, parents before children
   const openPath = n => { for (let p = n.parent; p; p = p.parent) if (!p.expanded) return false; return true; };
+  const gone = (n, now) => !n.shown || (n.hiding && now >= n.tw.t0 + DUR);
+  let compactTimer = 0;
 
   function relayout(f) {
     if (f) focus = f;
@@ -676,40 +723,52 @@ async function initView() {
     targets = new Map();
     place(root, new V(), new V(1, 0, 0), new V(0, 0, 1), targets);
 
-    const now = performance.now();
+    const now = performance.now(), prev = live;
+    live = [];
     let k = 0;
-    for (const n of nodes) {                       // pre-order: parents before children
-      const t = targets.get(n);
-      if (t) {
-        if (!n.shown) {                            // appearing: start inside the parent
-          const p = n.parent?.shown ? n.parent : null;
-          if (p) { n.x = p.x; n.y = p.y; n.z = p.z; } else [n.x, n.y, n.z] = t;
-          n.s = 0; n.shown = true;
-          tween(n, t, 1, now + Math.min(k++ * 4, 350));
-        } else tween(n, t, 1, now);
-        n.hiding = false;
-      } else if (n.shown) {                        // disappearing: shrink into the nearest visible ancestor
-        let p = n.parent; while (!targets.has(p)) p = p.parent;
-        const pt = targets.get(p);
-        if (!n.hiding || n.tw?.x1 !== pt[0] || n.tw?.y1 !== pt[1] || n.tw?.z1 !== pt[2]) { n.hiding = true; tween(n, pt, 0, now); }
+    for (const [n, t] of targets) {                // pre-order: parents before children
+      ensure(n);
+      if (gone(n, now)) {                          // appearing: start inside the parent
+        const p = n.parent?.shown ? posAt(n.parent, now) : null;
+        if (p) { n.x = p.x; n.y = p.y; n.z = p.z; } else [n.x, n.y, n.z] = t;
+        n.s = 0; n.shown = true; n.fresh = true;
+        setTween(n, t, 1, now + Math.min(k++ * 4, 350));
+      } else if (n.hiding || n.tw.x1 !== t[0] || n.tw.y1 !== t[1] || n.tw.z1 !== t[2]) {
+        posAt(n, now); setTween(n, t, 1, now);
       }
+      n.hiding = false;
+      live.push(n);
+    }
+    for (const n of prev) {                        // disappearing: shrink into the nearest visible ancestor
+      if (targets.has(n)) continue;
+      if (gone(n, now)) { n.shown = n.hiding = false; continue; }
+      let p = n.parent; while (!targets.has(p)) p = p.parent;
+      const pt = targets.get(p);
+      if (!n.hiding || n.tw.x1 !== pt[0] || n.tw.y1 !== pt[1] || n.tw.z1 !== pt[2]) { posAt(n, now); n.hiding = true; setTween(n, pt, 0, now); }
+      live.push(n);
     }
     refreshAlpha();
+    sync();
     pickLabels();
     frame(focus);
+    clearTimeout(compactTimer);
+    compactTimer = setTimeout(compact, animEnd - now + 60);
   }
-
-  function tween(n, t, s, t0) {
-    n.tw = { x0: n.x, y0: n.y, z0: n.z, s0: n.s, x1: t[0], y1: t[1], z1: t[2], s1: s, t0 };
+  function compact() {                     // drop what has finished shrinking away
+    const now = performance.now(), n0 = live.length;
+    live = live.filter(n => { if (n.hiding && gone(n, now)) { n.shown = n.hiding = false; return false; } return true; });
+    if (live.length !== n0) sync();
   }
   function refreshAlpha() {               // filtered-out nodes fade; so does everything outside the focus
-    const on = filtering();
+    const on = filtering(), now = performance.now();
     const near = new Set();
     for (let a = focus; a; a = a.parent) near.add(a);
-    for (const n of nodes) {
+    for (const n of live) {
       let inside = focus === root || near.has(n);
       for (let a = n.parent; !inside && a; a = a.parent) if (a === focus) inside = true;
-      n.alT = (!on || n === root || n.match ? 1 : 0.15) * (inside ? 1 : 0.32);
+      const t = (!on || n === root || n.match ? 1 : 0.15) * (inside ? 1 : 0.22);
+      if (n.fresh) { n.a0 = n.a1 = t; n.ta = -1e9; n.fresh = false; }
+      else if (t !== n.a1) { posAt(n, now); n.a0 = n.al; n.a1 = t; n.ta = now; animEnd = Math.max(animEnd, now + FADE); }
     }
   }
 
@@ -722,7 +781,7 @@ async function initView() {
     const aspect = Math.max(0.4, (innerWidth - sideW) / innerHeight);
     const hfov = 2 * Math.atan(Math.tan(vfov / 2) * aspect);
     const half = Math.min(vfov, hfov) / 2;
-    return THREE.MathUtils.clamp(radius / Math.sin(half) * (narrow() ? 1.2 : 1.08), 6, 5000);
+    return THREE.MathUtils.clamp(radius / Math.sin(half) * (narrow() ? 1.2 : 1.08), 4, 5000);
   }
   function frame(n) {
     // bounding sphere of the folder and everything visible below it
@@ -734,7 +793,7 @@ async function initView() {
     })(n);
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     goalT.copy(sphere.center);
-    const dist = fitFor(sphere.radius + 1.2);
+    const dist = fitFor(sphere.radius + 0.9);
     const cur = new V().subVectors(camera.position, controls.target).normalize();
     let dir;
     if (n === root || !n._N) {                     // look down on the common surface, keeping the azimuth
@@ -752,82 +811,151 @@ async function initView() {
     focus = n;
     setHash(n);
     refreshAlpha();
+    sync();
     pickLabels();
     frame(n);
   }
   controls.addEventListener('start', () => { flying = false; manual = true; dismissHint(); });
 
-  /* ---- instanced wireframes: cubes for folders, squares for files ---- */
-  const fogU = { uNear: { value: 30 }, uFar: { value: 120 } };
-  const FRAG = `varying vec3 vC;
-    void main() { gl_FragColor = vec4(vC, 1.0);
-    #include <colorspace_fragment>
-    }`;
-  const CUBE_VS = `attribute vec3 iPos; attribute float iSize; attribute vec3 iColor;
-    uniform float uNear, uFar; varying vec3 vC;
+  /* ---- instanced boxes: glass cubes for folders, thin tiles for files ----
+     One draw call each. Faces are a faint tint, edges a crisp line of constant pixel width
+     (from the face UVs), all additive on the dark background. */
+  const U = { uNow: { value: 0 }, uDur: { value: DUR }, uFade: { value: FADE }, uNear: { value: 30 }, uFar: { value: 120 } };
+  const BOX_VS = `
+    attribute vec3 iFrom, iTo, iTw, iAl, iCol; attribute float iSz;
+    #ifdef TILE
+    attribute vec3 iNrm;
+    #endif
+    uniform float uNow, uDur, uFade, uNear, uFar, uHot;
+    varying vec3 vC; varying vec2 vUv; varying float vTop;
     void main() {
-      vec3 p = position * iSize;
+      float t = uDur > 0.0 ? clamp((uNow - iTw.x) / uDur, 0.0, 1.0) : 1.0;
+      float u = 1.0 - t, v = t - 1.0;
+      float e = t < 0.5 ? 4.0 * t * t * t : 1.0 - 4.0 * u * u * u;
+      float s = iTw.y + (iTw.z - iTw.y) * (iTw.z >= iTw.y ? 1.0 + 2.4 * v * v * v + 1.4 * v * v : t * t * t);
+      float hot = float(gl_InstanceID) == uHot ? 1.0 : 0.0;
+      float f = uFade > 0.0 ? clamp((uNow - iAl.z) / uFade, 0.0, 1.0) : 1.0;
+      float a = mix(iAl.x, iAl.y, f * f * (3.0 - 2.0 * f));
+      vec3 p = position * max(s, 0.0) * iSz * (1.0 + 0.3 * hot);
+    #ifdef TILE
+      vec3 n = normalize(iNrm), up = abs(n.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+      vec3 bu = normalize(cross(up, n)), bv = cross(n, bu);
+      p = bu * p.x + bv * p.y + n * p.z;                                            // lies in its fan
+      vTop = 0.0;
+    #else
       p = vec3(0.707 * (p.x + p.z), p.y, 0.707 * (p.z - p.x));                     // 45° about y
       p = vec3(p.x, 0.82 * p.y - 0.57 * p.z, 0.57 * p.y + 0.82 * p.z);              // ~35° tilt: reads as a cube
-      vec4 mv = viewMatrix * vec4(iPos + p, 1.0);
+      vTop = max(normal.y, 0.0);
+    #endif
+      vec4 mv = viewMatrix * vec4(mix(iFrom, iTo, e) + p, 1.0);
       gl_Position = projectionMatrix * mv;
-      vC = iColor * (1.0 - smoothstep(uNear, uFar, -mv.z));
+      vC = iCol * a * (1.0 + 0.7 * hot) * (1.0 - smoothstep(uNear, uFar, -mv.z));
+      vUv = uv;
     }`;
-  const SQUARE_VS = `attribute vec3 iPos; attribute float iSize; attribute vec3 iColor;
-    uniform float uNear, uFar; varying vec3 vC;
+  const BOX_FS = `
+    uniform float uFill, uEdge;
+    varying vec3 vC; varying vec2 vUv; varying float vTop;
     void main() {
-      vec4 mv = viewMatrix * vec4(iPos, 1.0);
-      mv.xy += position.xy * iSize;                                                 // always faces the camera
-      gl_Position = projectionMatrix * mv;
-      vC = iColor * (1.0 - smoothstep(uNear, uFar, -mv.z));
+      vec2 d = min(vUv, 1.0 - vUv);
+      float w = min(d.x, d.y);
+      float edge = 1.0 - smoothstep(0.6, 1.8, w / max(fwidth(w), 1e-5));         // ~1.5 px line
+      gl_FragColor = vec4(vC, uFill * (1.0 + 1.2 * vTop) + (uEdge - uFill) * edge);
+      #include <colorspace_fragment>
     }`;
-  function instancedLines(basePositions, cap, vs) {
+  function boxSet(geo, cap, tile, fill, edge) {
     const g = new THREE.InstancedBufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(basePositions, 3));
-    const mk = (name, size) => {
-      const a = new THREE.InstancedBufferAttribute(new Float32Array(Math.max(1, cap) * size), size);
-      a.setUsage(THREE.DynamicDrawUsage); g.setAttribute(name, a); return a.array;
-    };
-    const set = { g, pos: mk('iPos', 3), size: mk('iSize', 1), col: mk('iColor', 3), n: 0 };
+    for (const k of ['position', 'normal', 'uv']) g.setAttribute(k, geo.getAttribute(k));
+    g.setIndex(geo.getIndex());
     g.instanceCount = 0;
-    const obj = new THREE.LineSegments(g, new THREE.ShaderMaterial({
-      uniforms: fogU, vertexShader: vs, fragmentShader: FRAG,
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-    }));
-    obj.frustumCulled = false;
-    scene.add(obj);
+    const set = { g, cap: 0, a: {}, list: [], tile };
+    grow(set, cap);
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { ...U, uHot: { value: -1 }, uFill: { value: fill }, uEdge: { value: edge } },
+      defines: tile ? { TILE: '' } : {}, vertexShader: BOX_VS, fragmentShader: BOX_FS,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    set.mat = mat;
+    const mesh = new THREE.Mesh(g, mat);
+    mesh.frustumCulled = false;
+    scene.add(mesh);
     return set;
   }
-  const cubeEdges = new THREE.EdgesGeometry(new THREE.BoxGeometry(1, 1, 1)).getAttribute('position').array;
-  const cubes = instancedLines(cubeEdges, dirs.length, CUBE_VS);
-  const squares = instancedLines([-.5, -.5, 0, .5, -.5, 0, .5, -.5, 0, .5, .5, 0, .5, .5, 0, -.5, .5, 0, -.5, .5, 0, -.5, -.5, 0],
-    nodes.length - dirs.length, SQUARE_VS);
-  function put(set, n, size, c, b) {
-    const i = set.n++;
-    set.pos[i * 3] = n.x; set.pos[i * 3 + 1] = n.y; set.pos[i * 3 + 2] = n.z;
-    set.size[i] = size;
-    set.col[i * 3] = c.r * b; set.col[i * 3 + 1] = c.g * b; set.col[i * 3 + 2] = c.b * b;
-  }
-  function flush(set) {
-    set.g.instanceCount = set.n;
-    for (const name of ['iPos', 'iSize', 'iColor']) {
-      const a = set.g.getAttribute(name);
-      a.clearUpdateRanges(); a.addUpdateRange(0, set.n * a.itemSize); a.needsUpdate = true;
+  function grow(set, need) {               // (re)allocate the per-instance buffers
+    set.cap = Math.max(64, need, set.cap * 2);
+    set.g.dispose();
+    const attrs = { iFrom: 3, iTo: 3, iTw: 3, iAl: 3, iCol: 3, iSz: 1 };
+    if (set.tile) attrs.iNrm = 3;
+    for (const [k, size] of Object.entries(attrs)) {
+      const at = new THREE.InstancedBufferAttribute(new Float32Array(set.cap * size), size);
+      set.g.setAttribute(k, at); set.a[k] = at;
     }
-    set.n = 0;
+  }
+  const cubes = boxSet(new THREE.BoxGeometry(1, 1, 1), 64, false, 0.06, 0.95);
+  const tiles = boxSet(new THREE.BoxGeometry(1, 1, TH / TILE), 256, true, 0.22, 0.7);
+
+  function fill(set, list) {
+    if (list.length > set.cap) grow(set, list.length);
+    const { iFrom, iTo, iTw, iAl, iCol, iSz, iNrm } = Object.fromEntries(Object.entries(set.a).map(([k, v]) => [k, v.array]));
+    for (let i = 0; i < list.length; i++) {
+      const n = list[i], tw = n.tw, o = i * 3;
+      n.slot = i;
+      iFrom[o] = tw.x0; iFrom[o + 1] = tw.y0; iFrom[o + 2] = tw.z0;
+      iTo[o] = tw.x1; iTo[o + 1] = tw.y1; iTo[o + 2] = tw.z1;
+      iTw[o] = tw.t0; iTw[o + 1] = tw.s0; iTw[o + 2] = tw.s1;
+      iAl[o] = n.a0; iAl[o + 1] = n.a1; iAl[o + 2] = n.ta;
+      const b = n.type === 'file' ? 1 : n === focus ? 1.35 : n.expanded ? 1.05 : 0.8;
+      iCol[o] = n.col.r * b; iCol[o + 1] = n.col.g * b; iCol[o + 2] = n.col.b * b;
+      iSz[i] = n.sz;
+      if (iNrm) { const N = n.parent._N; iNrm[o] = N.x; iNrm[o + 1] = N.y; iNrm[o + 2] = N.z; }
+    }
+    for (const at of Object.values(set.a)) {
+      at.clearUpdateRanges(); at.addUpdateRange(0, list.length * at.itemSize); at.needsUpdate = true;
+    }
+    set.g.instanceCount = list.length;
+    set.list = list;
+  }
+  function sync() {
+    const ds = [], fs = [];
+    for (const n of live) (n.type === 'dir' ? ds : fs).push(n);
+    fill(cubes, ds); fill(tiles, fs);
+    syncHot();
+    linksDirty = true;
+  }
+  function syncHot() {
+    const s = hovered?.shown && !hovered.hiding ? hovered.slot : -1;
+    cubes.mat.uniforms.uHot.value = hovered?.type === 'dir' ? s : -1;
+    tiles.mat.uniforms.uHot.value = hovered?.type === 'file' ? s : -1;
   }
 
-  /* ---- folder-to-folder links (one line each) ---- */
+  /* ---- folder-to-folder links (one line each; updated only while something moves) ---- */
   const lPos = new Float32Array(dirs.length * 6), lCol = new Float32Array(dirs.length * 6);
   const lGeo = new THREE.BufferGeometry();
   lGeo.setAttribute('position', new THREE.BufferAttribute(lPos, 3).setUsage(THREE.DynamicDrawUsage));
   lGeo.setAttribute('color', new THREE.BufferAttribute(lCol, 3).setUsage(THREE.DynamicDrawUsage));
   const links = new THREE.LineSegments(lGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
   links.frustumCulled = false; scene.add(links);
+  let linksDirty = true;
+  function updateLinks(now) {
+    let e = 0;
+    for (const n of cubes.list) {
+      const p = n.parent;
+      if (!p || !p.shown) continue;
+      posAt(n, now); posAt(p, now);
+      const f = clamp01(n.s) * n.al * 0.4, o = e * 6;
+      lPos[o] = p.x; lPos[o + 1] = p.y; lPos[o + 2] = p.z; lPos[o + 3] = n.x; lPos[o + 4] = n.y; lPos[o + 5] = n.z;
+      lCol[o] = p.col.r * f; lCol[o + 1] = p.col.g * f; lCol[o + 2] = p.col.b * f;
+      lCol[o + 3] = n.col.r * f; lCol[o + 4] = n.col.g * f; lCol[o + 5] = n.col.b * f;
+      e++;
+    }
+    lGeo.setDrawRange(0, e * 2);
+    for (const a of [lGeo.attributes.position, lGeo.attributes.color]) {
+      a.clearUpdateRanges(); a.addUpdateRange(0, e * 6); a.needsUpdate = true;
+    }
+  }
 
   /* ---- screen projection (picking and labels) ---- */
   const proj = { x: 0, y: 0, r: 0, z: 0 };
-  function project(n) {                     // -> proj in CSS px; false when behind the camera
+  function project(n) {                     // n's current position -> proj in CSS px; false when behind the camera
     const me = camera.matrixWorldInverse.elements, pe = camera.projectionMatrix.elements;
     const vx = me[0] * n.x + me[4] * n.y + me[8] * n.z + me[12];
     const vy = me[1] * n.x + me[5] * n.y + me[9] * n.z + me[13];
@@ -839,13 +967,15 @@ async function initView() {
     proj.x = (cx / cw + 1) / 2 * innerWidth;
     proj.y = (1 - cy / cw) / 2 * innerHeight;
     proj.z = -vz;
-    proj.r = n.sz * 0.55 * Math.max(0, n.s) * n.hs * pe[5] * innerHeight / 2 / -vz;
+    proj.r = n.sz * 0.55 * Math.max(0, n.s) * (n === hovered ? 1.3 : 1) * pe[5] * innerHeight / 2 / -vz;
     return true;
   }
-  function pick(px, py) {                   // front-most node under the pointer
+  function pick(px, py, now = performance.now()) {   // front-most node under the pointer
     let best = null, bestZ = Infinity;
-    for (const n of nodes) {
-      if (!n.shown || n.hiding || n.s < 0.5 || !project(n)) continue;
+    for (const n of live) {
+      if (n.hiding) continue;
+      posAt(n, now);
+      if (n.s < 0.5 || !project(n)) continue;
       const r = Math.max(6, proj.r * (n.type === 'dir' ? 1.2 : 1));
       const dx = proj.x - px, dy = proj.y - py;
       if (dx * dx + dy * dy < r * r && proj.z < bestZ) { bestZ = proj.z; best = n; }
@@ -887,19 +1017,19 @@ async function initView() {
   }
   const boxes = [];
   let lastHover = null;
-  function placeLabels() {
+  function placeLabels(now) {
     boxes.length = 0;
     const list = hovered ? [hovered, ...labeled.filter(n => n !== hovered)] : labeled;
     if (lastHover && lastHover !== hovered && !labeled.includes(lastHover)) lastHover.lbl.hidden = true;
     lastHover = hovered;
-    const near = fogU.uNear.value, far = fogU.uFar.value;
+    const near = U.uNear.value, far = U.uFar.value;
     for (const n of list) {
       const d = labelEl(n);
       d.classList.toggle('hot', n === hovered);
-      let ok = n.shown && n.s > 0.35 && project(n);
+      let ok = n.shown && posAt(n, now).s > 0.35 && project(n);
       let x = 0, y = 0, op = 0;
       if (ok) {
-        x = proj.x; y = proj.y + proj.r + 3;
+        x = proj.x; y = proj.y + proj.r + 2;
         op = (1 - THREE.MathUtils.smoothstep(proj.z, near, far)) * Math.min(1, n.al * 1.3);
         const w = n.lblW, h = 17, l = x - w / 2;
         ok = op > 0.06 && x > -w && x < innerWidth + w && y > -h && y < innerHeight + h;
@@ -914,59 +1044,13 @@ async function initView() {
     }
   }
 
-  /* ---- per-frame node animation ---- */
-  const easeInOut = t => t < .5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2;
-  const easeOutBack = t => { const c1 = 1.4, c3 = c1 + 1; return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2; };
-  const easeIn = t => t * t * t;
   let hovered = null;
-
-  function step(n, now, dt) {
-    const tw = n.tw;
-    if (tw) {
-      const t = DUR ? THREE.MathUtils.clamp((now - tw.t0) / DUR, 0, 1) : 1;
-      const e = easeInOut(t);
-      n.x = tw.x0 + (tw.x1 - tw.x0) * e;
-      n.y = tw.y0 + (tw.y1 - tw.y0) * e;
-      n.z = tw.z0 + (tw.z1 - tw.z0) * e;
-      n.s = tw.s0 + (tw.s1 - tw.s0) * (tw.s1 >= tw.s0 ? easeOutBack(t) : easeIn(t));
-      if (t >= 1) { n.tw = null; if (n.hiding) { n.hiding = false; n.shown = false; } }
-    }
-    const k = 1 - Math.pow(0.8, dt * 60);
-    n.hs += ((n === hovered ? 1.3 : 1) - n.hs) * k;
-    n.al += (n.alT - n.al) * k * 0.6;
-  }
-
-  const c = new THREE.Color(), white = new THREE.Color(1, 1, 1);
-  function draw(now, dt) {
-    let e = 0;
-    for (const n of nodes) {
-      if (!n.shown) continue;
-      step(n, now, dt);
-      if (!n.shown) continue;
-      const size = n.sz * Math.max(0, n.s) * n.hs;
-      const lit = n === hovered || n === hot;
-      c.copy(n.col); if (lit) c.lerp(white, 0.35);
-      if (n.type === 'file') { put(squares, n, size, c, n.al * (lit ? 1.7 : 0.85)); continue; }
-      put(cubes, n, size, c, n.al * (lit ? 1.6 : n === focus ? 1.3 : n.expanded ? 1.05 : 0.8));
-      if (n !== root && n.parent.shown) {
-        const p = n.parent, f = Math.min(1, Math.max(0, n.s)) * n.al * 0.45, o = e * 6;
-        lPos[o] = p.x; lPos[o + 1] = p.y; lPos[o + 2] = p.z; lPos[o + 3] = n.x; lPos[o + 4] = n.y; lPos[o + 5] = n.z;
-        lCol[o] = p.col.r * f; lCol[o + 1] = p.col.g * f; lCol[o + 2] = p.col.b * f;
-        lCol[o + 3] = n.col.r * f; lCol[o + 4] = n.col.g * f; lCol[o + 5] = n.col.b * f;
-        e++;
-      }
-    }
-    flush(cubes); flush(squares);
-    lGeo.setDrawRange(0, e * 2);
-    for (const a of [lGeo.attributes.position, lGeo.attributes.color]) {
-      a.clearUpdateRanges(); a.addUpdateRange(0, e * 6); a.needsUpdate = true;
-    }
-  }
+  function setHover(n) { if (n && !n.shown) n = null; hovered = n; syncHot(); }
 
   /* ---- pointer ---- */
   let pointerIn = false, pointerType = 'mouse', down = null, tapped = null, px = 0, py = 0, moved = true;
   canvas.addEventListener('pointermove', e => { pointerIn = true; pointerType = e.pointerType; px = e.clientX; py = e.clientY; moved = true; });
-  canvas.addEventListener('pointerleave', () => { pointerIn = false; if (hovered) { hovered = null; canvas.style.cursor = ''; setHot(null); } });
+  canvas.addEventListener('pointerleave', () => { pointerIn = false; if (hovered) { setHover(null); canvas.style.cursor = ''; setHot(null); } });
   canvas.addEventListener('pointerdown', e => { pointerType = e.pointerType; down = [e.clientX, e.clientY]; });
   canvas.addEventListener('click', e => {
     if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;   // that was a drag
@@ -1010,20 +1094,21 @@ async function initView() {
       if (controls.target.distanceTo(goalT) < 0.01 && camera.position.distanceTo(goalP) < 0.02) flying = false;
     }
     const dist = camera.position.distanceTo(controls.target);
-    fogU.uNear.value = scene.fog.near = dist * 0.9;
-    fogU.uFar.value = scene.fog.far = dist * 3.5 + 20;
+    U.uNear.value = scene.fog.near = dist * 0.9;
+    U.uFar.value = scene.fog.far = dist * 3.5 + 20;
+    U.uNow.value = now;
 
     controls.update();
     camera.updateMatrixWorld();
 
     if (pointerIn && pointerType === 'mouse' && (moved || flying || (frameNo & 3) === 0)) {
       moved = false;
-      const n = pick(px, py);
-      if (n !== hovered) { hovered = n; canvas.style.cursor = n ? 'pointer' : ''; setHot(n); }
+      const n = pick(px, py, now);
+      if (n !== hovered) { setHover(n); canvas.style.cursor = n ? 'pointer' : ''; setHot(n); }
     }
-    draw(now, dt);
+    if (linksDirty || now < animEnd + 50) { updateLinks(now); linksDirty = false; }
     renderer.render(scene, camera);
-    placeLabels();
+    placeLabels(now);
     frameNo++;
   });
 
@@ -1031,7 +1116,7 @@ async function initView() {
 
   return {
     relayout,
-    setHover(n) { hovered = n; },
+    setHover,
     resetView() { setFocus(root); },
   };
 }
