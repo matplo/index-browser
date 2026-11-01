@@ -1,8 +1,8 @@
 # index-browser
 
 Turn any directory of files into an interactive **3D `index.html`** for the files: talks, papers,
-figures and media. Folders are glowing nodes that **unfold** into cards for their files. Click a
-card to open the file in a new tab. A side panel adds search, type filters and a plain list.
+figures and media. Folders are wireframe cubes that **fan out** into their files when clicked.
+Click a file to open it in a new tab. A side panel adds search, type filters and a plain list.
 
 Made for static hosting such as GitHub Pages: one self-contained HTML file, no build step, and
 no runtime dependencies (three.js loads from a CDN).
@@ -19,10 +19,13 @@ Live example: <https://matplo.github.io/publix/>
 
 ## What you get
 
-- **Unfolding radial tree** (three.js). Every visible file gets an equal slice of the circle, and
-  unfolding sweeps cards out along arcs while the folder you clicked stays put.
-- **Real thumbnails.** Images show their contents, videos a frame, and HTML files their `<title>`.
-  PDFs and other types get typed icon cards.
+- **A tree you fly through** (three.js). Folders are wireframe cubes and files are square
+  outlines, coloured by type. The top-level folders sit on a common surface around the root.
+  Click a folder and its contents fan out in a plane perpendicular to the one it sits in,
+  pointing away from the centre, and the camera flies to face it. Sub-folders fan out again,
+  at right angles to their parent.
+- **Stays fast with thousands of files.** Every cube and square is drawn in two instanced draw
+  calls, and only the labels that matter (the open folder, its path, its files) are on screen.
 - **Side panel** with live search (`/` to focus), type filters (HTML · PDF · Image · Video · …),
   and sizes and dates. It stays in sync with the 3D view.
 - **Deep links.** `index.html#talks/2026` opens with that folder unfolded.
@@ -57,12 +60,6 @@ Re-running `index-browser` rewrites **only those**, so you can restyle the page 
 refreshing it. After upgrading index-browser, run with `--fresh` to pick up the new page design;
 this discards hand edits. index-browser never overwrites an `index.html` it didn't create unless
 you pass `--fresh`.
-
-### Opening the file directly
-
-Browsers block WebGL from using local images when a page is opened as `file://…`. The page
-still works but shows icon cards instead of thumbnails there. Serve it over HTTP
-(`index-browser --serve`, `python -m http.server`, GitHub Pages, …) for the full view.
 
 ## GitHub Pages
 
